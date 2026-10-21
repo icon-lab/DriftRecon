@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "driftrecon"
+version = "1.0.0"
+description = "DriftRecon: guidance-coupled nullspace drifting for one-step medical image reconstruction (CT and MRI)"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "torch>=2.1",
+]
+
+[project.optional-dependencies]
+# Multi-coil MRI operator, ESPIRiT coil maps and the M4Raw loader.
+mri = ["deepinv>=0.3", "sigpy", "h5py", "tqdm"]
+# Mayo .IMA conversion.
+ct-data = ["pydicom"]
+# PNG/TIFF/JPEG CT slices.
+images = ["pillow>=10"]
+# Paper metrics (tools/ct_metrics.py, tools/mri_metrics.py).
+eval = ["scikit-image", "scipy", "lpips", "pytorch-fid"]
+espirit-gpu = ["cupy-cuda12x"]
+test = ["pytest>=8"]
+all = ["driftrecon[mri,ct-data,images,eval,test]"]
+
+[project.scripts]
+driftrecon-ct-train = "driftrecon.ct.train:main"
+driftrecon-ct-test = "driftrecon.ct.test:main"
+driftrecon-ct-reconstruct = "driftrecon.ct.reconstruct:main"
+driftrecon-mri-build-cache = "driftrecon.mri.build_cache:main"
+driftrecon-mri-train = "driftrecon.mri.train:main"
+driftrecon-mri-evaluate = "driftrecon.mri.evaluate:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
