@@ -4,8 +4,8 @@ M. Tuna Alatan, A. Server Tapan, M. Usama Mirza, Bilal Kabas, Ge Wang, Saban Ozt
 
 [[arXiv]](https://arxiv.org/abs/XXXX.XXXXX)
 
-Official implementation of **DriftRecon** for sparse-view CT (AAPM/Mayo) and accelerated multi-coil
-MRI (M4Raw). DriftRecon is a generative method for one-step medical image reconstruction. It performs
+Official implementation of **DriftRecon** for sparse-view CT and accelerated multi-coil
+MRI. DriftRecon is a generative method for one-step medical image reconstruction. It performs
 drifting in the nullspace of the imaging operator, and its conditional guidance parameter uses a
 coupled kernel temperature to steer the fidelity–realism trade-off at inference.
 
