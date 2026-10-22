@@ -1,6 +1,6 @@
 # Guidance-Coupled Nullspace Drifting for One-Step Medical Image Reconstruction
 
-M. Tuna Alatan, A. Server Tapan, M. Usama Mirza, Bilal Kabas, Ge Wang, Saban Ozturk, and Tolga Çukur
+M. Tuna Alatan, A. Server Tapan, Saban Ozturk, M. Usama Mirza, Bilal Kabas, Ge Wang, and Tolga Çukur
 
 [[arXiv]](https://arxiv.org/abs/XXXX.XXXXX)
 
@@ -96,8 +96,8 @@ CKPT=checkpoints/m4raw/model_XXXXXX.pth bash scripts/mri/test.sh
 ```bibtex
 @article{alatan2026driftrecon,
   title   = {Guidance-Coupled Nullspace Drifting for One-Step Medical Image Reconstruction},
-  author  = {Alatan, M. Tuna and Tapan, A. Server and Mirza, M. Usama and Kabas, Bilal and
-             Wang, Ge and Ozturk, Saban and {\c{C}}ukur, Tolga},
+  author  = {Alatan, M. Tuna and Tapan, A. Server and Ozturk, Saban and Mirza, M. Usama and Kabas, Bilal and
+             Wang, Ge and {\c{C}}ukur, Tolga},
   journal = {arXiv preprint arXiv:XXXX.XXXXX},
   year    = {2026}
 }
