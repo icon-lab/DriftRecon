@@ -2,7 +2,7 @@
 
 M. Tuna Alatan, A. Server Tapan, Saban Ozturk, M. Usama Mirza, Bilal Kabas, Ge Wang, and Tolga Çukur
 
-[[arXiv]](https://arxiv.org/abs/XXXX.XXXXX)
+[[arXiv]](https://arxiv.org/abs/2610.38953)
 
 Official implementation of **DriftRecon** for sparse-view CT and accelerated multi-coil
 MRI. DriftRecon is a generative method for one-step medical image reconstruction. It performs
