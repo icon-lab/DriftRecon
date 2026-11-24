@@ -12,8 +12,8 @@ Per slice (magnitude images), mean +- std over slices:
   FID             : Inception-v3 pool3 features, same [0,1] scaling, per acceleration rate
 Paired two-sided Wilcoxon signed-rank test against --ref (slice level).
 
-  python tools/mri_metrics.py --R 4,6,8 \\
-      --pred DriftRecon=outputs/mri_test/preds/model_020000 --lpips alex --fid
+  python tools/mri_metrics.py --R 4,8 \\
+      --pred DriftRecon=outputs/mri_test/preds/model_avg --lpips alex --fid
 """
 import argparse
 import os
@@ -114,7 +114,7 @@ def load_pred(pred_dir, R, ref_ids):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--R", default="4,6,8")
+    ap.add_argument("--R", default="4,8")
     ap.add_argument("--pred", nargs="+", required=True, help="NAME=<prediction folder of one checkpoint>")
     ap.add_argument("--lpips", choices=("none", "alex", "vgg"), default="alex")
     ap.add_argument("--fid", action="store_true")

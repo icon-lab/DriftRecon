@@ -20,7 +20,7 @@ import torch.nn.functional as F
 def sample_cfg_scales(
     batch_size: int,
     cfg_min: float = 1.0,
-    cfg_max: float = 4.0,
+    cfg_max: float = 6.0,
     *,
     device: torch.device | str,
     generator: torch.Generator | None = None,
@@ -318,6 +318,7 @@ def driftrecon_objective(
     dwt_levels: int = 3,
     cfg_temperature_beta: float = 0.0,
     null_negatives: torch.Tensor | None = None,
+    drift_space: str = "null",
 ) -> dict[str, torch.Tensor]:
     """Full DriftRecon loss.
 
@@ -326,7 +327,9 @@ def driftrecon_objective(
     ``(B, C, H, W)`` references.  ``null_negatives`` optionally gives the
     ``(B, B, C, H, W)`` mismatched negatives ``P_{N_i} x_j`` of each condition
     ``i``. The drift term is averaged over the Haar bands of the null components; 
-    the fidelity terms act on the raw outputs::
+    the fidelity terms act on the raw outputs.  ``drift_space="image"`` is the
+    image-domain ablation: the drift acts on ``generated``/``target`` directly
+    (and ``null_negatives`` is ignored)::
 
         loss = lambda_drift * drift + lambda_mse * MSE + lambda_l1 * L1
                + lambda_l1_null * L1(null_generated, null_target)
@@ -335,13 +338,19 @@ def driftrecon_objective(
         raise ValueError("Expected generated (B,G,C,H,W) and target (B,C,H,W).")
     if null_generated.shape != generated.shape or null_target.shape != target.shape:
         raise ValueError("Null-projected tensors must match generated/target shapes.")
+    if drift_space not in ("null", "image"):
+        raise ValueError("drift_space must be 'null' or 'image'.")
     cfg_temperature_factors(cfg_scale, cfg_temperature_beta)
     batch_size, generations = generated.shape[:2]
-    flat_null = null_generated.reshape(
-        batch_size * generations, *null_generated.shape[2:]
+    if drift_space == "image":
+        drift_generated, drift_target, null_negatives = generated, target, None
+    else:
+        drift_generated, drift_target = null_generated, null_target
+    flat_drift = drift_generated.reshape(
+        batch_size * generations, *drift_generated.shape[2:]
     )
-    generated_bands = haar_bands(flat_null, int(dwt_levels))
-    target_bands = haar_bands(null_target, int(dwt_levels))
+    generated_bands = haar_bands(flat_drift, int(dwt_levels))
+    target_bands = haar_bands(drift_target, int(dwt_levels))
     if null_negatives is None:
         negative_bands = [None] * len(target_bands)
     else:

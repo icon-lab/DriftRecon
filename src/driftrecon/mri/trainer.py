@@ -30,17 +30,17 @@ CHECKPOINT_FORMAT = "driftrecon_mri_v1"
 
 @dataclass
 class TrainConfig:
-    max_steps: int = 50_000
+    max_steps: int = 20_000
     lr: float = 1e-4
     weight_decay: float = 0.0
     lr_decay_step: int = 10_000
     lr_decay_gamma: float = 0.5
     cfg_min: float = 1.0
-    cfg_max: float = 4.0
+    cfg_max: float = 6.0
     cfg_sampling_power: float = 3.0
     no_cfg_fraction: float = 0.5
     generations: int = 2
-    cfg_temperature_beta: float = 0.5
+    cfg_temperature_beta: float = 0.25
     train_sigma: float = TRAIN_NULL_NOISE_SIGMA
     temperatures: tuple[float, ...] = (1.0,)
     drift_scale: float = 1.0
@@ -49,7 +49,8 @@ class TrainConfig:
     lambda_mse: float = 0.01
     lambda_l1_null_start: float = 0.01
     lambda_l1_null_end: float = 0.0
-    dwt_levels: int = 3
+    dwt_levels: int = 0
+    drift_space: str = "null"
     max_grad_norm: Optional[float] = 1.0
     ema_rate: float = 0.999
     use_fp16: bool = True
@@ -69,6 +70,8 @@ class TrainConfig:
             raise ValueError("temperatures must contain finite positive values.")
         if int(self.dwt_levels) < 0:
             raise ValueError("dwt_levels must be nonnegative.")
+        if self.drift_space not in ("null", "image"):
+            raise ValueError("drift_space must be 'null' or 'image'.")
         if int(self.lr_decay_step) <= 0 or not 0.0 < float(self.lr_decay_gamma) <= 1.0:
             raise ValueError("Invalid step learning-rate schedule.")
         if not 0.0 <= float(self.ema_rate) < 1.0:
@@ -202,8 +205,13 @@ class DriftReconMRITrainer:
             )
             with torch.no_grad():
                 null_target = self.p_inverse.null_project(operator, x_fs, spectral_scale=spectral_scale)
-                # Mismatched negatives of condition i are z_ij = P_{N_i} x_j.
-                null_negatives = self._operator_matched_negatives(x_fs, mask, coil_maps, spectral_scale)
+                # Mismatched negatives of condition i are z_ij = P_{N_i} x_j
+                # (image-domain drift uses the raw targets x_j instead).
+                null_negatives = (
+                    self._operator_matched_negatives(x_fs, mask, coil_maps, spectral_scale)
+                    if cfg.drift_space == "null"
+                    else None
+                )
             losses = driftrecon_objective(
                 output,
                 x_fs,
@@ -219,6 +227,7 @@ class DriftReconMRITrainer:
                 dwt_levels=cfg.dwt_levels,
                 cfg_temperature_beta=cfg.cfg_temperature_beta,
                 null_negatives=null_negatives,
+                drift_space=cfg.drift_space,
             )
 
         self.scaler.scale(losses["loss"]).backward()
@@ -276,7 +285,7 @@ class DriftReconMRITrainer:
         if state.get("format") != CHECKPOINT_FORMAT:
             raise ValueError(f"{path} is not a {CHECKPOINT_FORMAT} checkpoint.")
         saved = state.get("train_config", {})
-        for key in ("cfg_temperature_beta", "dwt_levels", "generations"):
+        for key in ("cfg_temperature_beta", "dwt_levels", "generations", "drift_space"):
             if key in saved and saved[key] != getattr(self.config, key):
                 raise ValueError(
                     f"Resume mismatch for {key}: checkpoint={saved[key]!r}, "

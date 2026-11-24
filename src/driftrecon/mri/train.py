@@ -34,11 +34,11 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--contrast", default="all", help="all, T1, T2 or FLAIR.")
     parser.add_argument("--slices-per-volume", type=int, default=18)
     parser.add_argument("--max-volumes", type=int, default=None)
-    parser.add_argument("--train-r", default="4,6,8", help="Comma-separated training accelerations.")
+    parser.add_argument("--train-r", default="4,8", help="Comma-separated training accelerations.")
     parser.add_argument("--mask-seed", type=int, default=0)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--batch-size", type=int, default=24)
-    parser.add_argument("--max-steps", type=int, default=50_000)
+    parser.add_argument("--max-steps", type=int, default=20_000)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--lr-decay-step", type=int, default=10_000)
     parser.add_argument("--lr-decay-gamma", type=float, default=0.5)
@@ -50,12 +50,18 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--krylov-steps", type=int, default=2)
     parser.add_argument("--cond-dim", type=int, default=256)
+    parser.add_argument("--no-measurement-conditioning", action="store_true",
+                        help="Ablation: remove the operator-aware (Krylov) measurement blocks.")
     parser.add_argument("--cg-steps", type=int, default=15)
     parser.add_argument("--power-iterations", type=int, default=20)
     parser.add_argument("--h1-alpha", type=float, default=0.5)
     parser.add_argument("--h1-floor", type=float, default=1e-6)
     parser.add_argument("--fixed-h1-alpha", action="store_true")
-    parser.add_argument("--dwt-levels", type=int, default=3)
+    parser.add_argument("--dwt-levels", type=int, default=0,
+                        help="Haar levels of the drift features; 0 = full-image drift (MRI default).")
+    parser.add_argument("--drift-space", choices=("null", "image"), default="null",
+                        help="Ablation: drift on null-space components (DriftRecon) or on raw "
+                             "model outputs (image domain).")
     parser.add_argument("--temperatures", type=positive_float_tuple, default=(1.0,),
                         help="Comma-separated base drift bandwidths tau_0.")
     parser.add_argument("--lambda-drift", type=float, default=1.0)
@@ -64,15 +70,16 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lambda-l1-null-start", type=float, default=0.01)
     parser.add_argument("--lambda-l1-null-end", type=float, default=0.0)
     parser.add_argument("--cfg-min", type=float, default=1.0)
-    parser.add_argument("--cfg-max", type=float, default=4.0)
+    parser.add_argument("--cfg-max", type=float, default=6.0)
     parser.add_argument("--cfg-sampling-power", type=float, default=3.0)
     parser.add_argument("--no-cfg-fraction", type=float, default=0.5)
     parser.add_argument("--generations", type=int, default=2)
-    parser.add_argument("--cfg-temperature-beta", type=float, default=0.5)
+    parser.add_argument("--cfg-temperature-beta", type=float, default=0.25,
+                        help="tau(cfg)=tau_0/(1+beta*(cfg-1)); zero gives a fixed bandwidth.")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--log-every", type=int, default=100)
-    parser.add_argument("--save-every", type=int, default=5000)
+    parser.add_argument("--save-every", type=int, default=1000)
     parser.add_argument("--checkpoint-dir", type=Path, required=True)
     parser.add_argument("--resume", type=Path, default=None)
     return parser
@@ -88,6 +95,7 @@ def main(argv: list[str] | None = None) -> None:
         krylov_steps=args.krylov_steps,
         cond_dim=args.cond_dim,
         use_checkpoint=args.use_checkpoint,
+        measurement_conditioning=not args.no_measurement_conditioning,
     )
     p_inverse = H1CGPseudoinverse(
         cg_steps=args.cg_steps,
@@ -115,6 +123,7 @@ def main(argv: list[str] | None = None) -> None:
         lambda_l1_null_start=args.lambda_l1_null_start,
         lambda_l1_null_end=args.lambda_l1_null_end,
         dwt_levels=args.dwt_levels,
+        drift_space=args.drift_space,
         max_grad_norm=args.max_grad_norm if args.max_grad_norm > 0 else None,
         ema_rate=args.ema_rate,
         use_fp16=not args.no_fp16,

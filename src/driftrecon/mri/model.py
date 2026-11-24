@@ -81,19 +81,36 @@ class MeasurementBlock(nn.Module):
 
 
 class ResidualBlock(nn.Module):
-    """``x + conv2(FiLM(relu(conv1 x))) + gain * measurement(FiLM(...))``."""
+    """``x + conv2(FiLM(relu(conv1 x))) + gain * measurement(FiLM(...))``.
 
-    def __init__(self, channels: int, *, cond_dim: int, krylov_steps: int) -> None:
+    ``measurement_conditioning=False`` (ablation) drops the measurement term
+    and its gain.
+    """
+
+    def __init__(
+        self,
+        channels: int,
+        *,
+        cond_dim: int,
+        krylov_steps: int,
+        measurement_conditioning: bool = True,
+    ) -> None:
         super().__init__()
         self.conv1 = _conv3(channels, channels)
         self.conv2 = _conv3(channels, channels)
         self.film = FiLM(cond_dim, channels)
-        self.gain = nn.Parameter(torch.tensor([1.0]))
-        self.measurement = MeasurementBlock(channels, krylov_steps=krylov_steps)
+        if measurement_conditioning:
+            self.gain = nn.Parameter(torch.tensor([1.0]))
+            self.measurement = MeasurementBlock(channels, krylov_steps=krylov_steps)
+        else:
+            self.gain = None
+            self.measurement = None
 
     def forward(self, features, cond, kspace, operator: MultiscaleOperator, scale: int):
         value = self.film(F.relu(self.conv1(features)), cond)
         residual = self.conv2(value)
+        if self.measurement is None:
+            return features + residual
         measured = self.measurement(value, kspace, operator, scale)
         return features + residual + self.gain * measured
 
@@ -107,11 +124,17 @@ class Stage(nn.Module):
         cond_dim: int,
         krylov_steps: int,
         use_checkpoint: bool,
+        measurement_conditioning: bool = True,
     ) -> None:
         super().__init__()
         self.blocks = nn.ModuleList(
             [
-                ResidualBlock(channels, cond_dim=cond_dim, krylov_steps=krylov_steps)
+                ResidualBlock(
+                    channels,
+                    cond_dim=cond_dim,
+                    krylov_steps=krylov_steps,
+                    measurement_conditioning=measurement_conditioning,
+                )
                 for _ in range(int(blocks))
             ]
         )
@@ -138,6 +161,8 @@ class DriftReconMRI(nn.Module):
     is conditioned on Krylov features of the SENSE operator restricted to
     resolution ``2**-s``, and every block receives the contrast/CFG condition.
     Inputs are zero-padded to a multiple of 8 internally.
+    ``measurement_conditioning=False`` is the ablation without the
+    operator-aware (Krylov) blocks.
     """
 
     def __init__(
@@ -148,6 +173,7 @@ class DriftReconMRI(nn.Module):
         cond_dim: int = 256,
         num_classes: int = len(CONTRASTS),
         use_checkpoint: bool = False,
+        measurement_conditioning: bool = True,
     ) -> None:
         super().__init__()
         self.krylov_steps = int(krylov_steps)
@@ -155,6 +181,7 @@ class DriftReconMRI(nn.Module):
         self.cond_dim = int(cond_dim)
         self.num_classes = int(num_classes)
         self.use_checkpoint = bool(use_checkpoint)
+        self.measurement_conditioning = bool(measurement_conditioning)
         self.condition_encoder = CFGConditionEncoder(
             self.cond_dim, num_classes=self.num_classes, norm_eps=None
         )
@@ -166,6 +193,7 @@ class DriftReconMRI(nn.Module):
                 cond_dim=self.cond_dim,
                 krylov_steps=self.krylov_steps,
                 use_checkpoint=self.use_checkpoint,
+                measurement_conditioning=self.measurement_conditioning,
             )
 
         w0, w1, w2, w3 = WIDTHS
@@ -215,4 +243,5 @@ class DriftReconMRI(nn.Module):
             "cond_dim": self.cond_dim,
             "num_classes": self.num_classes,
             "use_checkpoint": self.use_checkpoint,
+            "measurement_conditioning": self.measurement_conditioning,
         }

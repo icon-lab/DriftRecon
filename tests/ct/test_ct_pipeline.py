@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 import pytest
 import torch
@@ -84,6 +86,78 @@ def test_test_entry_point_single_sample_sigma_and_ema(tmp_path):
         assert outputs[(sigma, ema)].shape == (3, 16, 16)
     assert not np.allclose(outputs[(0.005, False)], outputs[(0.05, False)])
     assert not np.allclose(outputs[(0.005, False)], outputs[(0.005, True)])
-    with pytest.raises(SystemExit):
-        ct_test.main(["--checkpoint", str(checkpoint), "--data-dir", str(data), "--out", str(tmp_path / "x"),
-                      "--samples", "4"])
+
+    def predict(*extra):
+        out = tmp_path / ("x" + "_".join(extra))
+        ct_test.main(["--checkpoint", str(checkpoint), "--data-dir", str(data), "--out", str(out),
+                      "--input-noise-sigma", "0.05", "--device", "cpu", *extra])
+        return np.load(out / "model_000001" / "pred_cfg1.npy")
+
+    single = predict()
+    averaged = predict("--samples", "3")
+    batched = predict("--samples", "3", "--batched-samples", "--sample-chunk", "2")
+    raw = predict("--no-final-dc")
+    assert averaged.shape == batched.shape == raw.shape == (3, 16, 16)
+    assert not np.allclose(single, averaged)
+    assert not np.allclose(single, raw)
+    with pytest.raises(ValueError):
+        predict("--samples", "0")
+
+
+def run_ct_model(model, images, operator):
+    with torch.no_grad():
+        return model(images, operator.forward(images), operator, torch.ones(images.shape[0]))
+
+
+def test_krylov_cache_does_not_change_the_output(monkeypatch):
+    from driftrecon.ct import model as ct_model
+
+    torch.manual_seed(8)
+    model = DriftReconCT(base_channels=2, blocks_per_stage=2, krylov_steps=2, cond_dim=8).eval()
+    operator = ParallelBeamCT((16, 16), num_views=5)
+    images = torch.rand(2, 1, 16, 16)
+    monkeypatch.setattr(ct_model, "_KRYLOV_CACHE", True)
+    cached = run_ct_model(model, images, operator)
+    monkeypatch.setattr(ct_model, "_KRYLOV_CACHE", False)
+    uncached = run_ct_model(model, images, operator)
+    torch.testing.assert_close(cached, uncached, rtol=0.0, atol=0.0)
+    assert all(block._shared_cache is None for block in model.modules()
+               if isinstance(block, ct_model.CTMeasurementBlock))
+
+
+def test_ablations_lr_schedule_and_endpoint_angles(tmp_path):
+    torch.manual_seed(9)
+    model = DriftReconCT(base_channels=2, blocks_per_stage=1, krylov_steps=1, cond_dim=8,
+                         measurement_conditioning=False)
+    from driftrecon.ct.model import CTMeasurementBlock
+
+    assert not any(isinstance(m, CTMeasurementBlock) for m in model.modules())
+    angles = torch.linspace(0.0, math.pi, 5).tolist()
+    operator = ParallelBeamCT((16, 16), num_views=5, angles=angles)
+    config = TrainConfig(max_steps=4, dwt_levels=1, drift_space="image", lr_schedule="step",
+                         lr_decay_step=1, lr_decay_gamma=0.5)
+    trainer = DriftReconCTTrainer(model, operator, H1CGPseudoinverse(cg_steps=3, power_iterations=3),
+                                  config, device="cpu")
+    images = torch.stack([SyntheticPhantomDataset(2, 16)[i] for i in range(2)])
+    lrs = [trainer.train_step(images)["lr"] for _ in range(2)]
+    assert lrs == pytest.approx([1e-4, 5e-5])
+    path = tmp_path / "ablation.pth"
+    trainer.save_checkpoint(path)
+    loaded_operator, loaded_model, _, _ = load_for_inference(path, "cpu")
+    assert not loaded_model.measurement_conditioning
+    torch.testing.assert_close(loaded_operator.angles, operator.angles)
+    assert float(loaded_operator.angles[-1]) == pytest.approx(math.pi)
+    with pytest.raises(ValueError):
+        DriftReconCTTrainer(tiny_model(), operator, H1CGPseudoinverse(cg_steps=3, power_iterations=3),
+                            TrainConfig(max_steps=4, dwt_levels=1), device="cpu").load_checkpoint(path)
+
+
+def test_flip_augmentation(tmp_path):
+    image = np.arange(16, dtype=np.float32).reshape(4, 4) / 16.0
+    np.save(tmp_path / "s.npy", image)
+    dataset = CTSliceDataset(tmp_path, image_size=(4, 4), augment=True)
+    torch.manual_seed(0)
+    seen = {tuple(dataset[0].flatten().tolist()) for _ in range(40)}
+    base = torch.from_numpy(image)
+    expected = {tuple(t.flatten().tolist()) for t in (base, base.flip(-1), base.flip(-2), base.flip(-1).flip(-2))}
+    assert seen == expected

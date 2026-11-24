@@ -31,7 +31,7 @@ __all__ = [
     "sinusoidal_scalar_embedding",
 ]
 
-# Input null-space noise level used during training (validation/test use a
-# separate, smaller level passed on the command line).
+# Input null-space noise level used during training.  Validation/test use
+# 0.02 x the training level (0.001); it can be overridden on the command line.
 TRAIN_NULL_NOISE_SIGMA = 0.05
-TEST_NULL_NOISE_SIGMA = 0.005
+TEST_NULL_NOISE_SIGMA = 0.001

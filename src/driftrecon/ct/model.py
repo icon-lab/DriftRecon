@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -9,6 +11,12 @@ from torch.utils.checkpoint import checkpoint
 
 from ..core.conditioning import CFGConditionEncoder, FiLM
 from .physics import ParallelBeamCT
+
+# The Krylov features of the measured sinogram depend only on the sinogram and
+# the feature size, so one forward pass computes them once per size and shares
+# them between blocks.  The result is unchanged; DRIFTRECON_CT_KRYLOV_CACHE=0
+# recomputes them in every block.
+_KRYLOV_CACHE = os.environ.get("DRIFTRECON_CT_KRYLOV_CACHE", "1") != "0"
 
 
 def _resize(image: torch.Tensor, size: tuple[int, int]) -> torch.Tensor:
@@ -36,6 +44,7 @@ class CTMeasurementBlock(nn.Module):
             nn.Conv2d(int(channels), int(channels), 3, padding=1, bias=False),
         )
         self.gain = nn.Parameter(torch.tensor(1.0))
+        self._shared_cache: dict | None = None
 
     @staticmethod
     def _normalizer(operator: ParallelBeamCT) -> float:
@@ -78,20 +87,27 @@ class CTMeasurementBlock(nn.Module):
         operator: ParallelBeamCT,
     ) -> torch.Tensor:
         size = tuple(int(v) for v in features.shape[-2:])
-        measured = _resize(operator.adjoint(sinogram) / self._normalizer(operator), size)
+        cache = self._shared_cache
+        measured_krylov = cache.get(size) if cache is not None else None
+        if measured_krylov is None:
+            measured = _resize(operator.adjoint(sinogram) / self._normalizer(operator), size)
+            measured_krylov = self._krylov(measured, operator, size)
+            if cache is not None:
+                cache[size] = measured_krylov
         decoded = self.decode(features)
         embedding = torch.cat(
-            [
-                self._krylov(measured, operator, size),
-                self._krylov(decoded, operator, size),
-            ],
+            [measured_krylov, self._krylov(decoded, operator, size)],
             dim=1,
         )
         return self.gain * self.encode(embedding)
 
 
 class CTResidualBlock(nn.Module):
-    """Convolutional residual block with FiLM and measurement conditioning."""
+    """Convolutional residual block with FiLM and measurement conditioning.
+
+    ``measurement_conditioning=False`` (ablation) removes the measurement
+    block, leaving a FiLM-conditioned residual block.
+    """
 
     def __init__(
         self,
@@ -99,13 +115,16 @@ class CTResidualBlock(nn.Module):
         *,
         cond_dim: int,
         krylov_steps: int,
+        measurement_conditioning: bool = True,
     ) -> None:
         super().__init__()
         channels = int(channels)
         self.conv1 = nn.Conv2d(channels, channels, 3, padding=1)
         self.conv2 = nn.Conv2d(channels, channels, 3, padding=1)
         self.film = FiLM(cond_dim, channels)
-        self.measurement = CTMeasurementBlock(channels, krylov_steps)
+        self.measurement = (
+            CTMeasurementBlock(channels, krylov_steps) if measurement_conditioning else None
+        )
 
     def forward(
         self,
@@ -117,6 +136,8 @@ class CTResidualBlock(nn.Module):
         value = F.relu(self.conv1(features), inplace=False)
         value = self.film(value, cond)
         residual = self.conv2(value)
+        if self.measurement is None:
+            return features + residual
         measured = self.measurement(value, sinogram, operator)
         return features + residual + measured
 
@@ -130,6 +151,7 @@ class CTStage(nn.Module):
         cond_dim: int,
         krylov_steps: int,
         use_checkpoint: bool,
+        measurement_conditioning: bool = True,
     ) -> None:
         super().__init__()
         if int(blocks) <= 0:
@@ -140,6 +162,7 @@ class CTStage(nn.Module):
                     channels,
                     cond_dim=cond_dim,
                     krylov_steps=krylov_steps,
+                    measurement_conditioning=measurement_conditioning,
                 )
                 for _ in range(int(blocks))
             ]
@@ -172,6 +195,8 @@ class DriftReconCT(nn.Module):
     per stage) whose every block is conditioned on the CFG scale and on
     Krylov features of the sparse-view sinogram.  Input and output are
     one-channel images ``(B, 1, H, W)`` with ``H, W`` divisible by 8.
+    ``measurement_conditioning=False`` is the ablation without the
+    operator-aware (Krylov) blocks.
     """
 
     def __init__(
@@ -182,6 +207,7 @@ class DriftReconCT(nn.Module):
         krylov_steps: int = 2,
         cond_dim: int = 256,
         use_checkpoint: bool = False,
+        measurement_conditioning: bool = True,
     ) -> None:
         super().__init__()
         if int(base_channels) <= 0:
@@ -191,6 +217,7 @@ class DriftReconCT(nn.Module):
         self.krylov_steps = int(krylov_steps)
         self.cond_dim = int(cond_dim)
         self.use_checkpoint = bool(use_checkpoint)
+        self.measurement_conditioning = bool(measurement_conditioning)
         widths = [self.base_channels * (2**index) for index in range(4)]
         self.condition_encoder = CFGConditionEncoder(cond_dim=self.cond_dim)
         self.head = nn.Conv2d(1, widths[0], 3, padding=1, bias=False)
@@ -202,6 +229,7 @@ class DriftReconCT(nn.Module):
                 cond_dim=self.cond_dim,
                 krylov_steps=self.krylov_steps,
                 use_checkpoint=self.use_checkpoint,
+                measurement_conditioning=self.measurement_conditioning,
             )
 
         self.encoder = nn.ModuleList([stage(width) for width in widths[:3]])
@@ -246,6 +274,23 @@ class DriftReconCT(nn.Module):
                 f"{tuple(cfg_scale.shape)}."
             )
 
+        blocks = [m for m in self.modules() if isinstance(m, CTMeasurementBlock)]
+        shared: dict | None = {} if _KRYLOV_CACHE else None
+        for block in blocks:
+            block._shared_cache = shared
+        try:
+            return self._forward_impl(model_input, sinogram, operator, cfg_scale)
+        finally:
+            for block in blocks:
+                block._shared_cache = None
+
+    def _forward_impl(
+        self,
+        model_input: torch.Tensor,
+        sinogram: torch.Tensor,
+        operator: ParallelBeamCT,
+        cfg_scale: torch.Tensor,
+    ) -> torch.Tensor:
         cond = self.condition_encoder(cfg_scale)
         value = self.head(model_input)
         skips = []
@@ -267,4 +312,5 @@ class DriftReconCT(nn.Module):
             "krylov_steps": self.krylov_steps,
             "cond_dim": self.cond_dim,
             "use_checkpoint": self.use_checkpoint,
+            "measurement_conditioning": self.measurement_conditioning,
         }

@@ -14,7 +14,7 @@ from driftrecon.core.drift import (
 
 def test_cfg_sampler_and_null_l1_schedule():
     scales = sample_cfg_scales(2048, device="cpu", generator=torch.Generator().manual_seed(3))
-    assert torch.all((scales >= 1.0) & (scales <= 4.0))
+    assert torch.all((scales >= 1.0) & (scales <= 6.0))
     assert 0.4 < float((scales == 1.0).float().mean()) < 0.6
     assert scheduled_null_l1_weight(0, 100)[0] == 0.01
     assert scheduled_null_l1_weight(100, 100)[0] == pytest.approx(0.0)
@@ -109,3 +109,29 @@ def test_default_negatives_equal_tiled_targets_and_custom_negatives_change_drift
     assert not torch.allclose(drift_grad(None), drift_grad(tiled + 0.5 * torch.randn_like(tiled)))
     with pytest.raises(ValueError):
         drift_grad(tiled[:, :2])
+
+
+def test_image_drift_space_uses_raw_outputs_and_ignores_negatives():
+    torch.manual_seed(14)
+    generated = torch.randn(3, 2, 1, 8, 8)
+    target = torch.randn(3, 1, 8, 8)
+    null_generated, null_target = 0.3 * generated, 0.3 * target
+    kwargs = dict(cfg_scale=torch.tensor([1.0, 2.0, 4.0]), temperatures=(1.0,), dwt_levels=1,
+                  cfg_temperature_beta=0.25, lambda_mse=0.0, lambda_l1_null=0.0)
+    image = driftrecon_objective(generated, target, null_generated, null_target,
+                                 drift_space="image", **kwargs)
+    direct = driftrecon_objective(generated, target, generated, target, **kwargs)
+    torch.testing.assert_close(image["loss_drift"], direct["loss_drift"])
+    negatives = torch.randn(3, 3, 1, 8, 8)
+    with_negatives = driftrecon_objective(generated, target, null_generated, null_target,
+                                          drift_space="image", null_negatives=negatives, **kwargs)
+    torch.testing.assert_close(image["loss_drift"], with_negatives["loss_drift"])
+    with pytest.raises(ValueError):
+        driftrecon_objective(generated, target, null_generated, null_target, drift_space="x", **kwargs)
+
+
+def test_cfg_sampler_defaults_to_alpha_max_six():
+    generator = torch.Generator().manual_seed(0)
+    scales = sample_cfg_scales(20000, device="cpu", generator=generator)
+    assert float(scales.max()) <= 6.0 and float(scales.max()) > 4.0
+    assert abs(float((scales == 1.0).float().mean()) - 0.5) < 0.02

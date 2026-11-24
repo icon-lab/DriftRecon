@@ -17,15 +17,13 @@ dependencies = [
 [project.optional-dependencies]
 # Multi-coil MRI operator, ESPIRiT coil maps and the M4Raw loader.
 mri = ["deepinv>=0.3", "sigpy", "h5py", "tqdm"]
-# Mayo .IMA conversion.
-ct-data = ["pydicom"]
 # PNG/TIFF/JPEG CT slices.
 images = ["pillow>=10"]
 # Paper metrics (tools/ct_metrics.py, tools/mri_metrics.py).
 eval = ["scikit-image", "scipy", "lpips", "pytorch-fid"]
 espirit-gpu = ["cupy-cuda12x"]
 test = ["pytest>=8"]
-all = ["driftrecon[mri,ct-data,images,eval,test]"]
+all = ["driftrecon[mri,images,eval,test]"]
 
 [project.scripts]
 driftrecon-ct-train = "driftrecon.ct.train:main"

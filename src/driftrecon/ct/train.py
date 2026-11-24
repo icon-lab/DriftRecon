@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 
 import torch
@@ -33,16 +34,30 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--window-min", type=float, default=None)
     parser.add_argument("--window-max", type=float, default=None)
     parser.add_argument("--max-slices", type=int, default=None)
-    parser.add_argument("--image-size", type=int, default=256)
-    parser.add_argument("--views", type=int, default=60)
-    parser.add_argument("--detectors", type=int, default=None)
+    parser.add_argument("--image-size", type=int, default=352)
+    parser.add_argument("--views", type=int, default=58)
+    parser.add_argument("--detectors", type=int, default=None,
+                        help="Detector bins; omitted = image diagonal + 1 (LoDoPaB recipe: 498).")
+    parser.add_argument("--angles-endpoint", action="store_true",
+                        help="Angles uniformly spaced over [0, pi] with both end points (LoDoPaB "
+                             "geometry); default [0, pi).")
+    parser.add_argument("--augment", action="store_true",
+                        help="Random horizontal/vertical flips of the training slices.")
     parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--max-steps", type=int, default=100_000)
+    parser.add_argument("--max-steps", type=int, default=120_000)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr-schedule", choices=("none", "cosine", "step"), default="step",
+                        help="Default: halve the lr every --lr-decay-step steps.")
+    parser.add_argument("--lr-decay-step", type=int, default=20_000,
+                        help="Step schedule: multiply the lr by --lr-decay-gamma every N steps.")
+    parser.add_argument("--lr-decay-gamma", type=float, default=0.5)
+    parser.add_argument("--lr-min", type=float, default=1e-6, help="Cosine schedule end value.")
     parser.add_argument("--base-channels", type=int, default=64)
     parser.add_argument("--blocks-per-stage", type=int, default=4)
     parser.add_argument("--krylov-steps", type=int, default=2)
     parser.add_argument("--cond-dim", type=int, default=256)
+    parser.add_argument("--no-measurement-conditioning", action="store_true",
+                        help="Ablation: remove the operator-aware (Krylov) measurement blocks.")
     parser.add_argument("--use-checkpoint", action="store_true",
                         help="Activation checkpointing (saves memory).")
     parser.add_argument("--cg-steps", type=int, default=15)
@@ -51,6 +66,9 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--h1-floor", type=float, default=1e-6)
     parser.add_argument("--fixed-h1-alpha", action="store_true")
     parser.add_argument("--dwt-levels", type=int, default=3)
+    parser.add_argument("--drift-space", choices=("null", "image"), default="null",
+                        help="Ablation: drift on null-space components (DriftRecon) or on raw "
+                             "model outputs (image domain).")
     parser.add_argument("--temperatures", type=positive_float_tuple, default=(0.2, 1.0),
                         help="Comma-separated base drift bandwidths tau_0.")
     parser.add_argument("--lambda-drift", type=float, default=1.0)
@@ -59,18 +77,18 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lambda-l1-null-start", type=float, default=0.01)
     parser.add_argument("--lambda-l1-null-end", type=float, default=0.0)
     parser.add_argument("--cfg-min", type=float, default=1.0)
-    parser.add_argument("--cfg-max", type=float, default=4.0)
+    parser.add_argument("--cfg-max", type=float, default=6.0)
     parser.add_argument("--cfg-sampling-power", type=float, default=3.0)
     parser.add_argument("--no-cfg-fraction", type=float, default=0.5)
     parser.add_argument("--generations", type=int, default=2)
-    parser.add_argument("--cfg-temperature-beta", type=float, default=0.5,
+    parser.add_argument("--cfg-temperature-beta", type=float, default=0.25,
                         help="tau(cfg)=tau_0/(1+beta*(cfg-1)); zero gives a fixed bandwidth.")
     parser.add_argument("--ema-rate", type=float, default=0.999)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--log-every", type=int, default=10)
-    parser.add_argument("--save-every", type=int, default=5000)
+    parser.add_argument("--save-every", type=int, default=1000)
     parser.add_argument("--checkpoint-dir", type=Path, default=Path("checkpoints"))
     parser.add_argument("--resume", type=Path, default=None)
     return parser
@@ -99,6 +117,7 @@ def main(argv: list[str] | None = None) -> None:
             window=window_from_args(args.window_min, args.window_max),
             array_key=args.array_key,
             max_slices=args.max_slices,
+            augment=args.augment,
         )
         data_description = str(args.data_dir)
     loader = DataLoader(
@@ -111,13 +130,19 @@ def main(argv: list[str] | None = None) -> None:
     if len(loader) == 0:
         raise ValueError("Dataset is too small for a full CFG batch.")
 
-    operator = ParallelBeamCT(image_shape, num_views=args.views, num_detectors=args.detectors)
+    angles = (
+        torch.linspace(0.0, math.pi, int(args.views)).tolist() if args.angles_endpoint else None
+    )
+    operator = ParallelBeamCT(
+        image_shape, num_views=args.views, num_detectors=args.detectors, angles=angles
+    )
     model = DriftReconCT(
         base_channels=args.base_channels,
         blocks_per_stage=args.blocks_per_stage,
         krylov_steps=args.krylov_steps,
         cond_dim=args.cond_dim,
         use_checkpoint=args.use_checkpoint,
+        measurement_conditioning=not args.no_measurement_conditioning,
     )
     p_inverse = H1CGPseudoinverse(
         cg_steps=args.cg_steps,
@@ -129,6 +154,10 @@ def main(argv: list[str] | None = None) -> None:
     config = TrainConfig(
         max_steps=args.max_steps,
         lr=args.lr,
+        lr_schedule=args.lr_schedule,
+        lr_decay_step=args.lr_decay_step,
+        lr_decay_gamma=args.lr_decay_gamma,
+        lr_min=args.lr_min,
         cfg_min=args.cfg_min,
         cfg_max=args.cfg_max,
         cfg_sampling_power=args.cfg_sampling_power,
@@ -142,6 +171,7 @@ def main(argv: list[str] | None = None) -> None:
         lambda_l1_null_start=args.lambda_l1_null_start,
         lambda_l1_null_end=args.lambda_l1_null_end,
         dwt_levels=args.dwt_levels,
+        drift_space=args.drift_space,
         ema_rate=args.ema_rate,
     )
     trainer = DriftReconCTTrainer(model, operator, p_inverse, config, device=device)
@@ -153,6 +183,7 @@ def main(argv: list[str] | None = None) -> None:
             {
                 "device": str(device),
                 "data": data_description,
+                "augment": bool(args.augment),
                 "samples": len(dataset),
                 "operator": {k: v for k, v in operator.geometry_dict().items() if k != "angles"},
                 "model": model.config_dict(),

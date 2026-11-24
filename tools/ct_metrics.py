@@ -2,17 +2,17 @@
 """
 DriftRecon CT -- paper metrics on the test set.
 
-GT: exported test slices (data/mayo_slices/test/*.npy, sorted by name).
+GT: LoDoPaB-CT test slices (data/lodopab/test/*.npy, sorted by name).
 Predictions: ``python -m driftrecon.ct.test`` output folders (pred_cfg*.npy + slice_names.txt).
 
-Per slice, mean +- std over the 263 test slices:
+Per slice, mean +- std over the test slices:
   PSNR / SSIM (%) : each image divided by its own mean, data_range = max of the normalized reference
   LPIPS (AlexNet) : gray [0,1] image copied to 3 channels in [-1,1]
   FID             : Inception-v3 pool3 features over the test slices
 Paired two-sided Wilcoxon signed-rank test against --ref (slice level).
 
-  python tools/ct_metrics.py --gt data/mayo_slices/test \
-      --pred DriftRecon=outputs/mayo60_test/model_080000 --lpips alex --fid
+  python tools/ct_metrics.py --gt data/lodopab/test \
+      --pred DriftRecon=outputs/lodopab_R6_test/model_avg --lpips alex --fid
 """
 import argparse
 import math
@@ -119,7 +119,7 @@ def parse_named(items):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--gt", type=Path, required=True, help="exported test slices (data/mayo_slices/test)")
+    ap.add_argument("--gt", type=Path, required=True, help="test slices (data/lodopab/test)")
     ap.add_argument("--pred", nargs="+", required=True, help="name=prediction folder written by driftrecon.ct.test (contains pred_cfg*.npy)")
     ap.add_argument("--lpips", choices=("none", "alex", "vgg"), default="alex")
     ap.add_argument("--fid", action="store_true")

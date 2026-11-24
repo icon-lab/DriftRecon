@@ -57,12 +57,13 @@ def test_sense_adjoint_and_reconstruction_assembly():
     )
 
 
-def test_train_step_with_wavelets_checkpoint_and_ema(tmp_path):
+def test_train_step_full_image_drift_checkpoint_and_ema(tmp_path):
     torch.manual_seed(0)
     trainer = tiny_trainer()
     metrics = trainer.train_step(synthetic_batch())
     assert all(np.isfinite(v) for v in metrics.values())
-    assert trainer.config.dwt_levels == 3
+    assert trainer.config.dwt_levels == 0
+    assert (trainer.config.cfg_max, trainer.config.cfg_temperature_beta) == (6.0, 0.25)
     path = tmp_path / "model.pth"
     trainer.save_checkpoint(path)
     restored = tiny_trainer()
@@ -104,3 +105,31 @@ def test_operator_matched_negatives_use_each_conditions_projector():
             torch.testing.assert_close(negatives[i, j], single[0], rtol=1e-4, atol=1e-5)
     # Different masks/coil maps per condition: P_{N_0} x_1 differs from P_{N_1} x_1.
     assert not torch.allclose(negatives[0, 1], negatives[1, 1], atol=1e-3)
+
+
+def test_image_drift_and_no_measurement_conditioning_ablation(tmp_path):
+    torch.manual_seed(3)
+    model = DriftReconMRI(blocks_per_stage=1, cond_dim=8, measurement_conditioning=False)
+    assert all(block.measurement is None and block.gain is None
+               for block in model.modules() if hasattr(block, "film"))
+    trainer = DriftReconMRITrainer(
+        model, H1CGPseudoinverse(cg_steps=3, power_iterations=3),
+        TrainConfig(max_steps=2, ema_rate=0.5, use_fp16=False, drift_space="image"), device="cpu",
+    )
+    trainer._operator_matched_negatives = None  # must not be called for image-domain drift
+    metrics = trainer.train_step(synthetic_batch())
+    assert all(np.isfinite(v) for v in metrics.values())
+    path = tmp_path / "ablation.pth"
+    trainer.save_checkpoint(path)
+    loaded, _, _ = load_for_inference(path, "cpu")
+    assert not loaded.measurement_conditioning
+    with pytest.raises(ValueError):
+        tiny_trainer().load_checkpoint(path)
+
+
+def test_magnitude_ssim_is_one_for_identical_images():
+    from driftrecon.mri.reconstruction import magnitude_ssim
+
+    x = torch.randn(2, 2, 32, 32)
+    torch.testing.assert_close(magnitude_ssim(x, x), torch.ones(2))
+    assert float(magnitude_ssim(x + 0.5 * torch.randn_like(x), x).max()) < 1.0

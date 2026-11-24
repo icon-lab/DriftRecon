@@ -116,7 +116,8 @@ class CTSliceDataset(Dataset[torch.Tensor]):
     """Directory of independent 2-D CT slices.
 
     Clinical HU arrays should pass an explicit ``window``.  Pre-normalized
-    research slices in ``[0,1]`` are preserved as-is.
+    research slices in ``[0,1]`` are preserved as-is.  ``augment`` applies
+    independent random horizontal and vertical flips (training only).
     """
 
     EXTENSIONS = {".npy", ".npz", ".png", ".tif", ".tiff", ".jpg", ".jpeg"}
@@ -129,8 +130,10 @@ class CTSliceDataset(Dataset[torch.Tensor]):
         window: Optional[tuple[float, float]] = None,
         array_key: str = "image",
         max_slices: Optional[int] = None,
+        augment: bool = False,
     ) -> None:
         self.root = Path(root)
+        self.augment = bool(augment)
         if not self.root.is_dir():
             raise FileNotFoundError(f"CT data directory does not exist: {self.root}")
         self.image_size = tuple(int(value) for value in image_size)
@@ -151,12 +154,19 @@ class CTSliceDataset(Dataset[torch.Tensor]):
         return len(self.paths)
 
     def __getitem__(self, index: int) -> torch.Tensor:
-        return load_ct_slice(
+        image = load_ct_slice(
             self.paths[index],
             array_key=self.array_key,
             window=self.window,
             image_size=self.image_size,
         )
+        if self.augment:
+            if torch.rand(()) < 0.5:
+                image = image.flip(-1)
+            if torch.rand(()) < 0.5:
+                image = image.flip(-2)
+            image = image.contiguous()
+        return image
 
 
 def make_ellipse_phantom(index: int, image_size: int) -> torch.Tensor:

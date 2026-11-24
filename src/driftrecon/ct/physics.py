@@ -10,10 +10,30 @@ unmatched rotate-and-sum forward projector with an approximate backprojector.
 from __future__ import annotations
 
 import math
+import os
 from typing import Optional, Sequence, Tuple
 
 import torch
 from torch import nn
+
+# On CUDA the projector is stored as a sparse CSR matrix ``M`` (views*detectors
+# x H*W), so forward = M x and adjoint = M^T s are single sparse-dense
+# products instead of a Python loop over views.  The weights and sums are the
+# same as in the loop.  Set DRIFTRECON_CT_SPARSE=0 to use the loop everywhere.
+_USE_SPARSE = os.environ.get("DRIFTRECON_CT_SPARSE", "1") != "0"
+
+
+class _SparseApply(torch.autograd.Function):
+    """``Y = M @ X`` with gradient ``M^T @ dY`` (``M``, ``Mt`` CSR; ``X`` dense (n, k))."""
+
+    @staticmethod
+    def forward(ctx, x, matrix, matrix_t):
+        ctx.matrix_t = matrix_t
+        return torch.sparse.mm(matrix, x)
+
+    @staticmethod
+    def backward(ctx, grad):
+        return torch.sparse.mm(ctx.matrix_t, grad.contiguous()), None, None
 
 
 class ParallelBeamCT(nn.Module):
@@ -134,10 +154,49 @@ class ParallelBeamCT(nn.Module):
         if not torch.is_floating_point(sinogram):
             raise TypeError("CT sinograms must use a floating-point dtype.")
 
+    def _sparse_matrices(self, device: torch.device):
+        """Cached CSR projector ``M`` and its transpose on ``device``."""
+        cache = self.__dict__.setdefault("_sparse_cache", {})
+        key = str(device)
+        if key not in cache:
+            views = self.num_views
+            pixels = self.image_shape[0] * self.image_shape[1]
+            offset = (torch.arange(views, device=device) * self.num_detectors)[:, None]
+            rows = torch.cat(
+                [
+                    (self.lower_index.to(device) + offset).flatten(),
+                    (self.upper_index.to(device) + offset).flatten(),
+                ]
+            )
+            cols = torch.arange(pixels, device=device).repeat(views)
+            cols = torch.cat([cols, cols])
+            values = torch.cat(
+                [
+                    self.lower_weight.to(device).flatten(),
+                    self.upper_weight.to(device).flatten(),
+                ]
+            ).float()
+            keep = values != 0
+            coo = torch.sparse_coo_tensor(
+                torch.stack([rows[keep], cols[keep]]),
+                values[keep],
+                (views * self.num_detectors, pixels),
+            ).coalesce()
+            cache[key] = (coo.to_sparse_csr(), coo.t().coalesce().to_sparse_csr())
+        return cache[key]
+
     def forward(self, image: torch.Tensor) -> torch.Tensor:
         """Apply the sparse-view ray transform."""
         self._check_image(image)
         batch, channels = image.shape[:2]
+        if _USE_SPARSE and image.is_cuda:
+            matrix, matrix_t = self._sparse_matrices(image.device)
+            flat = image.reshape(batch * channels, -1).float().t().contiguous()
+            out = _SparseApply.apply(flat, matrix, matrix_t).t()
+            return (
+                out.reshape(batch, channels, self.num_views, self.num_detectors).to(image.dtype)
+                * self.projection_scale
+            )
         pixels = image.flatten(start_dim=2)
         projections = []
         for view in range(self.num_views):
@@ -157,6 +216,14 @@ class ParallelBeamCT(nn.Module):
         """Apply the exact discrete transpose (unfiltered backprojection)."""
         self._check_sinogram(sinogram)
         batch, channels = sinogram.shape[:2]
+        if _USE_SPARSE and sinogram.is_cuda:
+            matrix, matrix_t = self._sparse_matrices(sinogram.device)
+            flat = sinogram.reshape(batch * channels, -1).float().t().contiguous()
+            out = _SparseApply.apply(flat, matrix_t, matrix).t()
+            return (
+                out.reshape(batch, channels, *self.image_shape).to(sinogram.dtype)
+                * self.projection_scale
+            )
         backprojection = sinogram.new_zeros(
             batch, channels, self.image_shape[0] * self.image_shape[1]
         )

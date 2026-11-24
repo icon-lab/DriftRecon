@@ -130,6 +130,7 @@ def convert_mri(state: dict) -> dict:
             "blocks_per_stage": 4,
             "cond_dim": int(args.get("conditioning_dim", 256)),
             "num_classes": 3,
+            "measurement_conditioning": str(args.get("meas_cond", True)).lower() not in ("false", "0"),
         },
         "p_inverse_config": {
             "cg_steps": int(args.get("null_cg_steps", 15)),

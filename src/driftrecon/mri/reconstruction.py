@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 
 from ..core.cg import H1CGPseudoinverse
 from .physics import SenseOperator
@@ -51,3 +52,33 @@ def magnitude_psnr(prediction: torch.Tensor, reference: torch.Tensor) -> torch.T
     data_range = ref.max(dim=1).values.clamp_min(1e-12)
     mse = (pred - ref).square().mean(dim=1).clamp_min(1e-20)
     return 20.0 * torch.log10(data_range) - 10.0 * torch.log10(mse)
+
+
+def _gaussian_window(size: int = 11, sigma: float = 1.5, *, device=None) -> torch.Tensor:
+    coords = torch.arange(size, dtype=torch.float32, device=device) - (size - 1) / 2.0
+    kernel = torch.exp(-(coords**2) / (2.0 * sigma**2))
+    kernel = kernel / kernel.sum()
+    return (kernel[:, None] * kernel[None, :])[None, None]
+
+
+def magnitude_ssim(prediction: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
+    """Per-slice magnitude SSIM (11x11 Gaussian, sigma 1.5) with ``data_range = max |reference|``.
+
+    Used for checkpoint selection only; the paper metrics come from
+    ``tools/mri_metrics.py``.
+    """
+    pred = magnitude(prediction)[:, None]
+    ref = magnitude(reference)[:, None]
+    data_range = ref.flatten(1).max(dim=1).values.clamp_min(1e-12)[:, None, None, None]
+    window = _gaussian_window(device=pred.device)
+    c1 = (0.01 * data_range) ** 2
+    c2 = (0.03 * data_range) ** 2
+    mu_p = F.conv2d(pred, window)
+    mu_r = F.conv2d(ref, window)
+    var_p = F.conv2d(pred * pred, window) - mu_p**2
+    var_r = F.conv2d(ref * ref, window) - mu_r**2
+    cov = F.conv2d(pred * ref, window) - mu_p * mu_r
+    ssim_map = ((2 * mu_p * mu_r + c1) * (2 * cov + c2)) / (
+        (mu_p**2 + mu_r**2 + c1) * (var_p + var_r + c2)
+    )
+    return ssim_map.flatten(1).mean(dim=1)

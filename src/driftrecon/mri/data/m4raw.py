@@ -413,7 +413,7 @@ class M4RawDataset(Dataset):
         contrast: str = "all",
         slices_per_volume: int = 18,
         max_volumes: Optional[int] = None,
-        train_r_values: Union[str, Sequence[float]] = "4,6,8",
+        train_r_values: Union[str, Sequence[float]] = "4,8",
         R: float = 4.0,
         mask_seed: int = 0,
     ) -> None:

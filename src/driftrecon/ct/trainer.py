@@ -29,15 +29,19 @@ CHECKPOINT_FORMAT = "driftrecon_ct_v1"
 
 @dataclass
 class TrainConfig:
-    max_steps: int = 100_000
+    max_steps: int = 120_000
     lr: float = 1e-4
     weight_decay: float = 0.0
+    lr_schedule: str = "step"
+    lr_decay_step: int = 20_000
+    lr_decay_gamma: float = 0.5
+    lr_min: float = 1e-6
     cfg_min: float = 1.0
-    cfg_max: float = 4.0
+    cfg_max: float = 6.0
     cfg_sampling_power: float = 3.0
     no_cfg_fraction: float = 0.5
     generations: int = 2
-    cfg_temperature_beta: float = 0.5
+    cfg_temperature_beta: float = 0.25
     train_sigma: float = TRAIN_NULL_NOISE_SIGMA
     temperatures: tuple[float, ...] = (0.2, 1.0)
     drift_scale: float = 1.0
@@ -47,6 +51,7 @@ class TrainConfig:
     lambda_l1_null_start: float = 0.01
     lambda_l1_null_end: float = 0.0
     dwt_levels: int = 3
+    drift_space: str = "null"
     max_grad_norm: Optional[float] = 1.0
     ema_rate: float = 0.999
 
@@ -70,6 +75,14 @@ class TrainConfig:
             raise ValueError("temperatures must contain finite positive values.")
         if int(self.dwt_levels) < 0:
             raise ValueError("dwt_levels must be nonnegative.")
+        if self.drift_space not in ("null", "image"):
+            raise ValueError("drift_space must be 'null' or 'image'.")
+        if self.lr_schedule not in ("none", "cosine", "step"):
+            raise ValueError("lr_schedule must be 'none', 'cosine' or 'step'.")
+        if int(self.lr_decay_step) <= 0 or not 0.0 < float(self.lr_decay_gamma) <= 1.0:
+            raise ValueError("Invalid step learning-rate schedule.")
+        if not 0.0 <= float(self.lr_min) <= float(self.lr):
+            raise ValueError("Expected 0 <= lr_min <= lr.")
         if not 0.0 <= float(self.ema_rate) < 1.0:
             raise ValueError("ema_rate must be in [0, 1).")
         weights = (
@@ -81,6 +94,20 @@ class TrainConfig:
         )
         if any(not math.isfinite(float(value)) or float(value) < 0 for value in weights):
             raise ValueError("Loss weights must be finite and nonnegative.")
+
+
+def scheduled_lr(config: TrainConfig, step: int) -> float:
+    """Learning rate at ``step``: constant, cosine to ``lr_min`` or step decay."""
+    if config.lr_schedule == "cosine":
+        progress = min(1.0, float(step) / max(1.0, float(config.max_steps)))
+        return float(config.lr_min) + 0.5 * (float(config.lr) - float(config.lr_min)) * (
+            1.0 + math.cos(math.pi * progress)
+        )
+    if config.lr_schedule == "step":
+        return float(config.lr) * float(config.lr_decay_gamma) ** (
+            int(step) // int(config.lr_decay_step)
+        )
+    return float(config.lr)
 
 
 def psnr(prediction: torch.Tensor, target: torch.Tensor) -> float:
@@ -170,6 +197,9 @@ class DriftReconCTTrainer:
         batch_size = images.shape[0]
         generations = int(self.config.generations)
         self.model.train()
+        lr = scheduled_lr(self.config, self.step)
+        for group in self.optimizer.param_groups:
+            group["lr"] = lr
         self.optimizer.zero_grad(set_to_none=True)
         sinogram = self.operator.forward(images)
         spectral_scale = self._spectral_scale(images)
@@ -238,6 +268,7 @@ class DriftReconCTTrainer:
             lambda_l1_null=lambda_l1_null,
             dwt_levels=self.config.dwt_levels,
             cfg_temperature_beta=self.config.cfg_temperature_beta,
+            drift_space=self.config.drift_space,
         )
         losses["loss"].backward()
         if self.config.max_grad_norm is not None:
@@ -268,6 +299,7 @@ class DriftReconCTTrainer:
         result.update(
             {
                 "step": float(self.step),
+                "lr": lr,
                 "psnr_model_output": psnr(model_output[:, 0], images),
                 "psnr_reconstruction": psnr(first_reconstruction, images),
                 "relative_data_residual": float(data_residual.cpu()),
@@ -308,9 +340,14 @@ class DriftReconCTTrainer:
         state = torch.load(path, map_location=self.device, weights_only=False)
         if state.get("format") != CHECKPOINT_FORMAT:
             raise ValueError(f"{path} is not a {CHECKPOINT_FORMAT} checkpoint.")
-        validate_cfg_temperature_beta_resume(
-            state.get("train_config", {}), self.config.cfg_temperature_beta
-        )
+        saved_train = state.get("train_config", {})
+        validate_cfg_temperature_beta_resume(saved_train, self.config.cfg_temperature_beta)
+        if saved_train.get("drift_space", "null") != self.config.drift_space:
+            raise ValueError(
+                "Checkpoint resume mismatch for drift_space: "
+                f"checkpoint={saved_train.get('drift_space', 'null')!r}, "
+                f"training={self.config.drift_space!r}."
+            )
         saved_operator = state.get("operator_config", {})
         current_operator = self.operator.geometry_dict()
         for key in (
@@ -334,7 +371,14 @@ class DriftReconCTTrainer:
             raise ValueError("Checkpoint CT projection angles do not match.")
         saved_model = state.get("model_config", {})
         current_model = self.model.config_dict()
-        for key in ("base_channels", "blocks_per_stage", "krylov_steps", "cond_dim"):
+        saved_model.setdefault("measurement_conditioning", True)
+        for key in (
+            "base_channels",
+            "blocks_per_stage",
+            "krylov_steps",
+            "cond_dim",
+            "measurement_conditioning",
+        ):
             if saved_model.get(key) != current_model.get(key):
                 raise ValueError(f"Checkpoint model configuration mismatch for {key}.")
         saved_inverse = state.get("p_inverse_config", {})
